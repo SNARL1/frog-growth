@@ -50,7 +50,9 @@ relocate_join <- relocate %>%
 
 relocate_join <- relocate_join %>% 
   select(collect_siteid, release_siteid1, release_siteid2, release_date, type, pit_tag_ref)
-
+# best to create translocation/reintroduction categories at this step instead of later in code
+# later in code, for sites that received both translocations and reintroductions, no frogs from one type might have been recaptured
+# as a result, population type category may be incorrect and need to be corrected manually (as I did). 84218 is an example of this. 
 ```
 
 ## Disconnect from database
@@ -67,7 +69,7 @@ write_csv(relocate_join, here::here("data", "relocate_join.csv"))
 ## Select frogs with multiple captures across primary periods
 ```{r}
 capture_join_dropna <- capture_join %>% 
-  drop_na() # excludes multiple captures within a primary period
+  drop_na() # excludes multiple captures within a primary period (because frogs are only measured at first capture)
 
 multiple_captures <- capture_join_dropna %>% 
   select(-tag_new, -capture_animal_state, -sex) %>% 
@@ -77,17 +79,9 @@ multiple_captures <- capture_join_dropna %>%
   inner_join(capture_join_dropna, by = "pit_tag_ref")
 ```
 
-## Histogram of number of captures per frog
+## Fix errors in relocate data
 ```{r}
-multiple_captures %>% 
-  distinct(pit_tag_ref, captures) %>% 
-  ggplot(aes(x = captures)) +
-    geom_histogram(binwidth = 1)
-```
-
-## Add population type (Bd naive, Bd treatment, recovery, translocated, reintroduced zoo-raised frogs, translocated-reintroduced) and frog type (resident-naturally recruited, translocated, reintroduced)
-```{r}
-# remove incorrect pit_tag_refs (to avoid many-to-many relationship, etc.)
+# remove incorrect pit_tag_refs (to avoid many-to-many relationship, etc.) in join statement below
 relocate_join <- relocate_join %>% 
   filter(!(collect_siteid == "72996" & pit_tag_ref == "900067000117396")) %>% 
   filter(!(collect_siteid == "10055" & pit_tag_ref == "900043000217381"))
@@ -100,42 +94,38 @@ multiple_captures_join <- multiple_captures_join %>%
   separate_wider_delim(collect_siteid, delim = ",", names = c("collect_siteid1", "collect_siteid2", "collect_siteid3"), too_few = "align_start")
 ```
 
-## Fix errors
+## Fix errors in capture/relocate data
 ```{r}
 # fix pit tags labeled as "translocation" or "reintroduction" for frogs that were tagged at one site and translocated months/years later to another site
-# fix pit tags labeled as "translocation" for frog that was tagged at one site, listed as translocated, but recaptured after at original site
+# fix pit tags labeled as "translocation" for frog that was tagged at one site, listed as translocated, but recaptured at late date at original site
 multiple_captures_join <- multiple_captures_join %>% 
-  mutate(type = replace(type, type == "translocation" & 
-                              (collect_siteid1 == site_id | collect_siteid2 == site_id | collect_siteid3 == site_id) & 
-                              release_date >= visit_date, NA), 
-         type = replace(type, type == "reintroduction" & 
+  mutate(type = replace(type, (type == "translocation" | type == "reintroduction") & 
                               (collect_siteid1 == site_id | collect_siteid2 == site_id | collect_siteid3 == site_id) & 
                               release_date >= visit_date, NA), 
          type = replace(type, type == "translocation" & pit_tag_ref == "091020125", NA))
 multiple_captures_join <- multiple_captures_join %>%  
   mutate(type = na_if(type, "NA"))
 
-# remove records where frogs were tagged in field, taken to lab for 3 months, then released back into field. Remove pre-release records. 
+# Remove pre-release records for frogs that were tagged in field, taken to lab for 3 months, then released back into field. . 
 multiple_captures_join <- multiple_captures_join %>% 
   filter(!between(site_id, 10475, 10477))
 
-# remove records where frogs were tagged in field and translocated, but not listed in relocate tables. Remove pre-release records.
+# Remove pre-release records for frogs that were tagged in field and translocated, but not listed in relocate tables.
 multiple_captures_join <- multiple_captures_join %>% 
   filter(site_id != 50183)
 
-# remove records where frogs were tagged in field and translocated, but tagging was done several years previously. Remove pre-release records.
+# Remove pre-release records for frogs that were tagged in field and translocated, but tagging was done several years previously. 
 multiple_captures_join <- multiple_captures_join %>% 
   filter(site_id != 70567)
+```
 
-# fix pit tags captured but not listed in relocate_frog and therefore don't have type in multiple_captures_join table - must be reintroduced frogs
+## Add population type (bd_naive, post_epizootic_declining, bd_treatment, translocated_naive, translocated_reintroduced, reintroduced_naive_declining,  recovery)
+```{r}
+# pit tags captured but not listed in relocate_frog and therefore don't have type in multiple_captures_join table - must be reintroduced frogs
 multiple_captures_join <- multiple_captures_join %>% 
-  mutate(type = replace(type, site_id == 10109, "reintroduction"),
-         type = replace(type, site_id == 10114, "reintroduction"),
-         type = replace(type, site_id == 10206, "reintroduction"),
-         type = replace(type, site_id == 11896, "reintroduction"),
-         type = replace(type, site_id == 70571, "reintroduction"))
+  mutate(type = replace(type, site_id %in% c(10109, 10114, 10206, 11896, 70571), "reintroduction"))
 
-
+# add population type codes
 sites <- multiple_captures_join %>% 
   distinct(site_id, type) %>% 
   mutate(code = case_when(!is.na(type) ~ 1)) %>% 
@@ -146,32 +136,89 @@ sites <- multiple_captures_join %>%
                                     translocation == 1 & reintroduction == 1 ~ 3)) %>% 
   arrange(site_id)
 
-# Add other population types
-translocated_reintroduced <- c(70114, 70175, 70279, 70413, 70611, 72008, 72093, 72442)   # 3
+# Add codes for other population types
+# 0: bd_naive, 1: translocated, 2: reintroduced, 3: translocated_reintroduced (translocated & reintroduced cohorts), 4: translocated_naive, 5: post_epizootic_declining, 6: bd_treatment, 7: reintroduced_naive_declining (reintroduced using naive or declining source), 8: natural_recovery 
+
+translocated <- c(84218, 82682) # 1
+translocated_reintroduced <- c(70114, 70175, 70279, 70413, 70611, 72008, 72093, 72442, 84218, 84226, 84237, 84325, 84326, 84327)   # 3
 reintroduced_naive_declining <- c(10276, 10277, 10284, 10285, 10314, 10315, 10316, 10422, 11359, 11506, 12361, 12534, 20196, 20198, 20199)  # 7
 translocated_naive <- c(10486, 50170, 50194, 50219)  # 4
 bd_naive <- c(11008, 11009)   # 0
 post_epizootic_declining <- c(72989, 74281, 12562)  # 5
 bd_treatment <- c(10100, 10101, 10102, 11858, 12590, 12618, 12621, 50839)  # 6
-recovery <- c(22019, 50783, 54188, 70355, 70399, 70442, 70627, 70650, 71362, 71679, 71811, 72021, 72336, 72808, 72849, 72996, 74060, 74061)  # 8
+natural_recovery <- c(22019, 50783, 54188, 70355, 70399, 70442, 70627, 70650, 71362, 71679, 71811, 72021, 72336, 72808, 72849, 72996, 74060, 74061, 82643, 82644, 82645, 82646, 84221, 84277, 84292, 84303, 84306, 84307, 84309, 84310, 84312, 84317, 84962, 84963, 87495)  # 8
 
 sites_join <- sites %>% 
-  mutate(population_type1 = case_when(site_id %in% translocated_reintroduced ~ 3,
+  mutate(population_type1 = case_when(site_id %in% translocated ~ 1,
+                                      site_id %in% translocated_reintroduced ~ 3,
                                       site_id %in% reintroduced_naive_declining ~ 7,
                                       site_id %in% translocated_naive ~ 4,
                                       site_id %in% bd_naive ~ 0,
                                       site_id %in% post_epizootic_declining ~ 5,
                                       site_id %in% bd_treatment ~ 6,
-                                      site_id %in% recovery ~ 8,
+                                      site_id %in% natural_recovery ~ 8,
                                       .default = population_type))
 
+multiple_captures_join1 <- multiple_captures_join %>% 
+  left_join(sites_join, by = "site_id") %>% 
+  select(site_id, population_type1, pit_tag_ref, tag_new, visit_date, capture_animal_state, sex, length, weight) %>% 
+  rename(population_type = population_type1, 
+         capture_date = visit_date, 
+         state = capture_animal_state)
 ```
 
+## Add frog type (translocated, reintroduced, resident)
+```{r}
+multiple_captures_frogtype <- multiple_captures_join1 %>% 
+  left_join(relocate_join, by = "pit_tag_ref") %>% 
+  rename(frog_type = type) %>% 
+  select(-collect_siteid, -release_siteid1, -release_siteid2, -release_date)
+
+# 1 = translocated
+reintroduced <- c(10109, 10114, 10206, 10486, 11506, 11896, 50170, 50194, 50219, 70571) # 2
+translocated_reintroduced <- c(70611) # 3 (translocated or reintroduced)
+resident <- c(10223, 10225, 10285, 10422, 22008, 70114, 70175, 70279, 70327, 70413, 70449, 70505, 70550, 70556, 70641, 72008, 72093, 72442, 72973, 74976, 82682, 84218, 84226, 84235, 84237, 84255) # 4
+
+
+multiple_captures_frogtype1 <- multiple_captures_frogtype %>% 
+  mutate(frog_type = case_when(site_id == 82682 & pit_tag_ref == "900067000117328" ~ "translocation"))
+
+multiple_captures_frogtype1 <- multiple_captures_frogtype %>% 
+  mutate(frog_type1 = case_when(frog_type == "translocation" ~ 1,
+                                frog_type == "reintroduction" ~ 2,
+                                (population_type == 0 | population_type == 5 | population_type == 6 | population_type == 8) & is.na(frog_type) ~ 4,
+                                site_id %in% reintroduced & is.na(frog_type) ~ 2,
+                                site_id %in% translocated_reintroduced & is.na(frog_type) ~ 3,
+                                site_id %in% resident & is.na(frog_type) ~ 4)) %>% 
+  arrange(site_id)
+```
+
+## Drop frogs with only 1 capture
+```{r}
+multiple_captures_final <- multiple_captures_frogtype1 %>% 
+  count(pit_tag_ref) %>% 
+  filter(n > 1) %>% 
+  inner_join(multiple_captures_frogtype1, by = "pit_tag_ref") %>% 
+  select(-n, -frog_type, -tag_new) %>% 
+  rename(frog_type = frog_type1)
+
+write_csv(multiple_captures_final, here::here("data", "frog_growth.csv"))
+```
+
+## Histogram of number of captures per frog
+```{r}
+multiple_captures_final %>% 
+  count(pit_tag_ref) %>% 
+  rename(captures = n) %>% 
+  ggplot(aes(x = captures)) +
+    geom_histogram(binwidth = 1)
+```
 
 Issues
 - Multiple_captures_join: 10109, reintroduced frogs 900043000200536 and 900043000200591 are not in relocate_frog but should be.  
-- Relocate tables: translocation from 50183 to 50194 not present. Move records of PIT tagged frogs from 50183 from capture table to relocate tables.
-- Budd Lake (70571) reintroductions now listed in relocate tables
+- Relocate tables: translocation from 50183 to 50194 and 50219 not present (50170 too, or was that tadpoles only?). Move records of PIT tagged frogs in 50183 from capture table to relocate tables.
+- Budd Lake (70571) reintroductions not listed in relocate tables
 - Frogs translocated from 70215 to 70611 in 2022 are not listed in relocate table, nor are frogs reintroduced to 70611 in the same year. 
 - PIT tag 900043000217381 shown as reintroduced to 10109 is likely incorrect. Same tag recorded twice at 70641. 
+- PIT tag 900067000117328 likely translocated to 84218 but not in relocate_frog table.
 
